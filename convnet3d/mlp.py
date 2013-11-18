@@ -3,16 +3,17 @@ MLP Layers using Theano
 
     LogRegr
     HiddenLayer
+    DropoutLayer
 """
 
-from numpy import zeros, asarray, sqrt
+from numpy import zeros, sqrt
 from numpy.random import RandomState
-from theano import shared, config
+from theano import shared, config, _asarray
 from theano.tensor.nnet import  softmax, sigmoid
-from dropout import dropout
+from theano.tensor.shared_randomstreams import RandomStreams
 import theano.tensor as T
-
 floatX = config.floatX
+
 
 class LogRegr(object):
     """ Logistic Regression Layer, Top layer, Softmax layer, Output layer """
@@ -56,15 +57,14 @@ class HiddenLayer(object):
     """ Hidden Layer """
 
     def __init__(self, input, n_in, n_out, activation, rng=RandomState(1234), 
-        layer_name="HiddenLayer", W=None, b=None, borrow=True, 
-        use_dropout = False, dropout_p=0.5):
+        layer_name="HiddenLayer", W=None, b=None, borrow=True):
 
         if W == None:
             # uniformly sampled W
             low = -sqrt(6. / (n_in + n_out))
             high = sqrt(6. / (n_in + n_out))
             values = rng.uniform(low=low, high=high, size=(n_in, n_out))
-            W_val = asarray(values, dtype=floatX)
+            W_val = _asarray(values, dtype=floatX)
             if activation == sigmoid: W_val *= 4
             self.W = shared(value=W_val, borrow=borrow, name=layer_name+'_W')
         else: 
@@ -81,6 +81,20 @@ class HiddenLayer(object):
         # Output of the hidden layer
         self.output = activation(T.dot(input, self.W) + self.b)
 
-        # dropout
-        if use_dropout: 
-            self.output = dropout(self.output, rng=rng, p=dropout_p)
+
+class DropoutLayer(object):
+    """ Dropout layer: https://github.com/mdenil/dropout """
+
+    def __init__(self, input, rng=RandomState(1234), p=0.5):
+        """
+        p is the probablity of dropping a unit
+        """
+
+        srng = RandomStreams(rng.randint(999999))
+
+        # p=1-p because 1's indicate keep and p is prob of dropping
+        mask = srng.binomial(n=1, p=1-p, size=input.shape)
+
+        # The cast is important because
+        # int * float32 = float64 which pulls things off the gpu
+        self.output = input * T.cast(mask, floatX)

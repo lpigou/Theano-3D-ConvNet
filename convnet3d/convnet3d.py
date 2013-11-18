@@ -10,17 +10,13 @@ RectLayer: rectification (absolute value)
 
 
 from conv3d2d import conv3d
-from max_pool_3d import max_pool_3d
-from dropout import dropout
+from maxpool3d import max_pool_3d
 
-from numpy import asarray, sqrt, prod, ones, floor, repeat
+from numpy import sqrt, prod, ones, floor, repeat, pi, exp, zeros, sum
 from numpy.random import RandomState
 
-from pylearn2.datasets.preprocessing import gaussian_filter
-from pylearn2.utils import sharedX
-
 from theano.tensor.nnet import conv2d
-from theano import shared, config
+from theano import shared, config, _asarray
 import theano.tensor as T
 floatX = config.floatX
 
@@ -28,12 +24,12 @@ floatX = config.floatX
 class ConvLayer(object):
     """ Convolutional layer, Filter Bank Layer """
 
-    def __init__(self, input, n_in_maps, n_out_maps, kernel_shape, input_shape, 
+    def __init__(self, input, n_in_maps, n_out_maps, kernel_shape, video_shape, 
         batch_size, activation, layer_name="Conv", rng=RandomState(1234), 
         borrow=True, W=None, g=None, b=None, use_bias=True, use_gain=False):
 
         """
-        input_shape: (frames, height, width)
+        video_shape: (frames, height, width)
         kernel_shape: (frames, height, width)
 
         W_shape: (out, in, kern_frames, kern_height, kern_width)
@@ -49,7 +45,7 @@ class ConvLayer(object):
             fan_in = prod(kernel_shape)*n_in_maps
             norm_scale = 2. * sqrt( 1. / fan_in )
             W_shape = (n_out_maps, n_in_maps)+kernel_shape
-            W_val = asarray(rng.normal(loc=0, scale=norm_scale, size=W_shape), \
+            W_val = _asarray(rng.normal(loc=0, scale=norm_scale, size=W_shape), \
                         dtype=floatX)
         self.W = shared(value=W_val, borrow=borrow, name=layer_name+'_W')
         self.params = [self.W]
@@ -69,7 +65,7 @@ class ConvLayer(object):
             self.params.append(self.g)
 
         # 3D convolution; dimshuffle: last 3 dimensions must be (in, h, w)
-        n_fr, h, w = input_shape
+        n_fr, h, w = video_shape
         n_fr_k, h_k, w_k = kernel_shape
         out = conv3d(
                 signals=input.dimshuffle([0,2,1,3,4]), 
@@ -95,16 +91,11 @@ class NormLayer(object):
 
         LCN: local contrast normalization
             kwargs: 
-                kernel_size=9, 
-                threshold=1e-4,
-                use_divisor=True
+                kernel_size=9, threshold=1e-4, use_divisor=True
 
         GCN: global contrast normalization
             kwargs:
-                scale=1., 
-                subtract_mean=True, 
-                use_std=False, 
-                sqrt_bias=0., 
+                scale=1., subtract_mean=True, use_std=False, sqrt_bias=0., 
                 min_divisor=1e-8
 
         MEAN: local mean subtraction
@@ -114,16 +105,16 @@ class NormLayer(object):
 
         input_shape = input.shape
 
-        # make 3D tensor out of 5D tensor -> (n_images, height, width)
-        input_shape_3D = (input_shape[0]*input_shape[1]*input_shape[2], 
+        # make 4D tensor out of 5D tensor -> (n_images, 1, height, width)
+        input_shape_4D = (input_shape[0]*input_shape[1]*input_shape[2], 1,
                             input_shape[3], input_shape[4])
-        input_3D = input.reshape(input_shape_3D, ndim=3)
+        input_4D = input.reshape(input_shape_4D, ndim=4)
         if method=="lcn":
-            out = self.lecun_lcn(input_3D, **kwargs)
+            out = self.lecun_lcn(input_4D, **kwargs)
         elif method=="gcn":
-            out = self.global_contrast_normalize(input_3D,**kwargs)
+            out = self.global_contrast_normalize(input_4D,**kwargs)
         elif method=="mean":
-            out = self.local_mean_subtraction(input_3D, **kwargs)
+            out = self.local_mean_subtraction(input_4D, **kwargs)
         else:
             raise NotImplementedError()
 
@@ -135,14 +126,12 @@ class NormLayer(object):
         Orginal code in Theano by: Guillaume Desjardins
         """
 
-        # reshape to 4D tensor required for theano conv2d()
-        X = X.dimshuffle(0,'x',1,2)
-
         filter_shape = (1, 1, kernel_size, kernel_size)
-        filters = sharedX(gaussian_filter(kernel_size).reshape(filter_shape))
-        # filters = filters.dimshuffle("x","x",0,1)
+        filters = gaussian_filter(kernel_size).reshape(filter_shape)
+        filters = shared(_asarray(filters, dtype=floatX), borrow=True)
 
-        convout = conv2d(X, filters=filters, border_mode='full')
+        convout = conv2d(X, filters=filters, filter_shape=filter_shape, 
+                            border_mode='full')
 
         # For each pixel, remove mean of kernel_sizexkernel_size neighborhood
         mid = int(floor(kernel_size/2.))
@@ -150,7 +139,8 @@ class NormLayer(object):
 
         if use_divisor:
             # Scale down norm of kernel_sizexkernel_size patch
-            sum_sqr_XX = conv2d(T.sqr(X), filters=filters, border_mode='full')
+            sum_sqr_XX = conv2d(T.sqr(new_X), filters=filters, 
+                                filter_shape=filter_shape, border_mode='full')
 
             denom = T.sqrt(sum_sqr_XX[:,:,mid:-mid,mid:-mid])
             per_img_mean = denom.mean(axis=[2,3])
@@ -159,56 +149,53 @@ class NormLayer(object):
 
             new_X /= divisor
 
-        return new_X
+        return T.cast(new_X, floatX)
 
     def local_mean_subtraction(self, X, kernel_size=5):
-
-        def mean_filter(kernel_size):
-            s = kernel_size**2
-            x = repeat(1./s, s).reshape((kernel_size, kernel_size))
-            return x
          
-        X = X.dimshuffle(0,'x',1,2)
-
         filter_shape = (1, 1, kernel_size, kernel_size)
-        filters = sharedX(mean_filter(kernel_size).reshape(filter_shape))
-        # filters = filters.dimshuffle("x","x",0,1)
+        filters = mean_filter(kernel_size).reshape(filter_shape)
+        filters = shared(_asarray(filters, dtype=floatX), borrow=True)
 
-        mean = conv2d(X, filters=filters, border_mode='full')
+        mean = conv2d(X, filters=filters, filter_shape=filter_shape, 
+                        border_mode='full')
         mid = int(floor(kernel_size/2.))
-        new_X = X - mean[:,:,mid:-mid,mid:-mid]  
 
-        return new_X
+        return X - mean[:,:,mid:-mid,mid:-mid]
 
     def global_contrast_normalize(self, X, scale=1., subtract_mean=True, 
         use_std=False, sqrt_bias=0., min_divisor=1e-8):
 
-        scale = float(scale)
         ndim = X.ndim
+        if not ndim in [3,4]: raise NotImplementedError("X.dim>4 or X.ndim<3")
+
+        scale = float(scale)
         mean = X.mean(axis=ndim-1)
         new_X = X.copy()
+
         if subtract_mean:
-            if X.ndim==3:
+            if ndim==3:
                 new_X = X - mean[:,:,None]
             else: new_X = X - mean[:,:,:,None]
+
         if use_std:
-            # ddof=1 simulates MATLAB's var() behaviour, which is what Adam
-            # Coates' code does.
             normalizers = T.sqrt(sqrt_bias + X.var(axis=ndim-1)) / scale
         else:
             normalizers = T.sqrt(sqrt_bias + (new_X ** 2).sum(axis=ndim-1)) / scale
+
         # Don't normalize by anything too small.
-        T.set_subtensor(normalizers[(normalizers < min_divisor).nonzero()],1.)
-        if X.ndim==3: new_X /= normalizers[:,:,None]
+        T.set_subtensor(normalizers[(normalizers < min_divisor).nonzero()], 1.)
+
+        if ndim==3: new_X /= normalizers[:,:,None]
         else: new_X /= normalizers[:,:,:,None]
+
         return new_X
 
 
 class PoolLayer(object):
     """ Subsampling and pooling layer """
 
-    def __init__(self, input, pool_shape, use_dropout=False, dropout_p=0.5, 
-        rng=RandomState(1234), method="max"):
+    def __init__(self, input, pool_shape, method="max"):
         """
         method: "max", "avg", "L2", "L4", ...
         """
@@ -221,14 +208,33 @@ class PoolLayer(object):
         else:
             raise NotImplementedError()
 
-        # dropout
-        if use_dropout: out = dropout(out, rng=rng, p=dropout_p)
-
         self.output = out
 
 
-class RectificationLayer(object):
+class RectLayer(object):
     """  Rectification layer """
 
     def __init__(self, input):
         self.output = T.abs_(input)
+
+
+def gaussian_filter(kernel_shape):
+
+    x = zeros((kernel_shape, kernel_shape), dtype='float32')
+
+    def gauss(x, y, sigma=2.0):
+        Z = 2 * pi * sigma**2
+        return  1./Z * exp(-(x**2 + y**2) / (2. * sigma**2))
+
+    mid = floor(kernel_shape/ 2.)
+    for i in xrange(0,kernel_shape):
+        for j in xrange(0,kernel_shape):
+            x[i,j] = gauss(i-mid, j-mid)
+
+    return x / sum(x)
+
+
+def mean_filter(kernel_size):
+    s = kernel_size**2
+    x = repeat(1./s, s).reshape((kernel_size, kernel_size))
+    return x

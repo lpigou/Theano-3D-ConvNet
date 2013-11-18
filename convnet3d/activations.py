@@ -10,7 +10,7 @@ import theano
 tanh = theano.tensor.tanh
 sigmoid = theano.tensor.nnet.sigmoid
 
-
-def recifier(self, X):
+@staticmethod
+def rectifier(X):
     """Rectified linear units"""
     return X * (X > 0.) 
