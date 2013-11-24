@@ -4,13 +4,14 @@ Activation functions
 """
 
 
-import theano
+import theano.tensor as T
 
 
-tanh = theano.tensor.tanh
-sigmoid = theano.tensor.nnet.sigmoid
+tanh = T.tanh
+sigmoid = T.nnet.sigmoid
+softplus = T.nnet.softplus
 
-@staticmethod
-def rectifier(X):
-    """Rectified linear units"""
-    return X * (X > 0.) 
+# @staticmethod
+def relu(X):
+    """Rectified linear units (relu)"""
+    return T.maximum(0,X)

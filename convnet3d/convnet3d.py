@@ -11,6 +11,7 @@ RectLayer: rectification (absolute value)
 
 from conv3d2d import conv3d
 from maxpool3d import max_pool_3d
+from activations import relu, softplus
 
 from numpy import sqrt, prod, ones, floor, repeat, pi, exp, zeros, sum
 from numpy.random import RandomState
@@ -26,7 +27,7 @@ class ConvLayer(object):
 
     def __init__(self, input, n_in_maps, n_out_maps, kernel_shape, video_shape, 
         batch_size, activation, layer_name="Conv", rng=RandomState(1234), 
-        borrow=True, W=None, g=None, b=None, use_bias=True, use_gain=False):
+        borrow=True, W=None, b=None):
 
         """
         video_shape: (frames, height, width)
@@ -44,25 +45,22 @@ class ConvLayer(object):
             # fan in: filter time x filter height x filter width x input maps
             fan_in = prod(kernel_shape)*n_in_maps
             norm_scale = 2. * sqrt( 1. / fan_in )
+            if activation in (relu,softplus): norm_scale = 0.01
             W_shape = (n_out_maps, n_in_maps)+kernel_shape
-            W_val = _asarray(rng.normal(loc=0, scale=norm_scale, size=W_shape), \
+            W_val = _asarray(rng.normal(loc=0, scale=norm_scale, size=W_shape),\
                         dtype=floatX)
         self.W = shared(value=W_val, borrow=borrow, name=layer_name+'_W')
         self.params = [self.W]
 
         # init bias
-        if use_bias:  
-            if b != None: b_val = b
-            else: b_val = ones((n_out_maps,), dtype=floatX)
-            self.b = shared(b_val, name=layer_name+"_b", borrow=borrow)
-            self.params.append(self.b)
-
-        # init gain
-        if use_gain: 
-            if g != None: g_val = g
-            else: g_val = ones((n_out_maps,), dtype=floatX)
-            self.g = shared(g_val, name=layer_name+"_g", borrow=borrow)
-            self.params.append(self.g)
+        if b != None: 
+            b_val = b
+        elif activation in (relu,softplus): 
+            b_val = ones((n_out_maps,), dtype=floatX)
+        else: 
+            b_val = zeros((n_out_maps,), dtype=floatX)
+        self.b = shared(b_val, name=layer_name+"_b", borrow=borrow)
+        self.params.append(self.b)
 
         # 3D convolution; dimshuffle: last 3 dimensions must be (in, h, w)
         n_fr, h, w = video_shape
@@ -74,12 +72,9 @@ class ConvLayer(object):
                 filters_shape=(n_out_maps, n_fr_k, n_in_maps, h_k, w_k),         
                 border_mode='valid').dimshuffle([0,2,1,3,4])
 
-        if use_bias: out += self.b.dimshuffle('x',0,'x','x','x')
-        out = activation(out)
-        # use gain after activation
-        if use_gain: out *= self.g.dimshuffle('x',0,'x','x','x')
+        out += self.b.dimshuffle('x',0,'x','x','x')
 
-        self.output = out
+        self.output = activation(out)
 
 
 class NormLayer(object):
@@ -120,7 +115,7 @@ class NormLayer(object):
 
         self.output = out.reshape(input_shape)
 
-    def lecun_lcn(self, X, kernel_size=9, threshold = 1e-4, use_divisor=True):
+    def lecun_lcn(self, X, kernel_size=7, threshold = 1e-4, use_divisor=False):
         """
         Yann LeCun's local contrast normalization
         Orginal code in Theano by: Guillaume Desjardins
@@ -139,7 +134,7 @@ class NormLayer(object):
 
         if use_divisor:
             # Scale down norm of kernel_sizexkernel_size patch
-            sum_sqr_XX = conv2d(T.sqr(new_X), filters=filters, 
+            sum_sqr_XX = conv2d(T.sqr(T.abs_(X)), filters=filters, 
                                 filter_shape=filter_shape, border_mode='full')
 
             denom = T.sqrt(sum_sqr_XX[:,:,mid:-mid,mid:-mid])
@@ -149,7 +144,7 @@ class NormLayer(object):
 
             new_X /= divisor
 
-        return T.cast(new_X, floatX)
+        return new_X#T.cast(new_X, floatX)
 
     def local_mean_subtraction(self, X, kernel_size=5):
          
