@@ -134,7 +134,7 @@ class NormLayer(object):
 
         if use_divisor:
             # Scale down norm of kernel_sizexkernel_size patch
-            sum_sqr_XX = conv2d(T.sqr(T.abs_(X)), filters=filters, 
+            sum_sqr_XX = conv2d(T.sqr(T.abs_(new_X)), filters=filters, 
                                 filter_shape=filter_shape, border_mode='full')
 
             denom = T.sqrt(sum_sqr_XX[:,:,mid:-mid,mid:-mid])
